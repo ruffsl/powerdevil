@@ -14,6 +14,7 @@
 #include <powerdevil_debug.h>
 
 #include <QDebug>
+#include <QFile>
 #include <QFileInfo>
 #include <QTimer>
 
@@ -38,10 +39,16 @@ BacklightDetector::BacklightDetector(QObject *parent)
 
 void BacklightDetector::detect()
 {
-    if (m_display) {
-        disconnect(m_display.get(), nullptr, nullptr, nullptr);
+    for (auto &display : m_displays) {
+        if (display) {
+            disconnect(display.get(), nullptr, nullptr, nullptr);
+        }
     }
-    std::shared_ptr<BacklightBrightness> deleteOld(m_display.release());
+    std::vector<std::shared_ptr<BacklightBrightness>> deleteOld;
+    for (auto &display : m_displays) {
+        deleteOld.push_back(std::move(display));
+    }
+    m_displays.clear();
 
     KAuth::Action brightnessAction(u"org.kde.powerdevil.backlighthelper.brightness"_s);
     brightnessAction.setHelperId(HELPER_ID);
@@ -72,26 +79,34 @@ void BacklightDetector::detect()
             // the sysfs calls always fail, leading to detectionFinished(false) emission.
             // Skip that command and carry on with the information that we do have.
             if (maxBrightness > 0) {
-                m_display.reset(new BacklightBrightness(cachedBrightness, maxBrightness, QString()));
+                m_displays.push_back(std::unique_ptr<BacklightBrightness>(new BacklightBrightness(cachedBrightness, maxBrightness, QString())));
             }
-            Q_EMIT detectionFinished(m_display != nullptr);
+            Q_EMIT detectionFinished(!m_displays.empty());
 #else
             KAuth::Action syspathAction(u"org.kde.powerdevil.backlighthelper.syspath"_s);
             syspathAction.setHelperId(HELPER_ID);
             KAuth::ExecuteJob* syspathJob = syspathAction.execute();
-            connect(syspathJob, &KJob::result, this, [this, syspathJob, cachedBrightness, maxBrightness, deleteOld = std::move(deleteOld)] {
+            connect(syspathJob, &KJob::result, this, [this, syspathJob, deleteOld = deleteOld] {
                 if (syspathJob->error()) {
                     qCWarning(POWERDEVIL) << "org.kde.powerdevil.backlighthelper.syspath failed";
                     qCDebug(POWERDEVIL) << syspathJob->errorText();
                     Q_EMIT detectionFinished(false);
                     return;
                 }
-                if (maxBrightness > 0) {
-                    QString syspath = syspathJob->data()[u"syspath"_s].toString();
-                    syspath = QFileInfo(syspath).symLinkTarget();
-                    m_display.reset(new BacklightBrightness(cachedBrightness, maxBrightness, syspath));
+                const QStringList syspaths = syspathJob->data()[u"syspaths"_s].toStringList();
+                const QVariantList brightnesses = syspathJob->data()[u"brightnesses"_s].toList();
+                const QVariantList maxes = syspathJob->data()[u"brightnessmaxes"_s].toList();
+
+                for (int i = 0; i < syspaths.size(); ++i) {
+                    const int maxB = maxes.value(i).toInt();
+                    if (maxB > 0) {
+                        const int cachedB = brightnesses.value(i).toInt();
+                        QString syspath = syspaths.at(i);
+                        syspath = QFileInfo(syspath).symLinkTarget();
+                        m_displays.push_back(std::unique_ptr<BacklightBrightness>(new BacklightBrightness(cachedB, maxB, syspath)));
+                    }
                 }
-                Q_EMIT detectionFinished(m_display != nullptr);
+                Q_EMIT detectionFinished(!m_displays.empty());
             });
             syspathJob->start();
 #endif
@@ -103,7 +118,11 @@ void BacklightDetector::detect()
 
 QList<DisplayBrightness *> BacklightDetector::displays() const
 {
-    return m_display ? QList<DisplayBrightness *>(1, m_display.get()) : QList<DisplayBrightness *>();
+    QList<DisplayBrightness *> ret;
+    for (const auto &display : m_displays) {
+        ret.append(display.get());
+    }
+    return ret;
 }
 
 BacklightBrightness::BacklightBrightness(int observedBrightness, int maxBrightness, QString syspath, QObject *parent)
@@ -250,6 +269,7 @@ void BacklightBrightness::setBrightness(int newBrightness, bool allowAnimations)
     action.setHelperId(HELPER_ID);
     action.addArgument(u"brightness"_s, newBrightness);
     action.addArgument(u"animationDuration"_s, willAnimate ? m_brightnessAnimationDurationMsec : 0);
+    action.addArgument(u"syspath"_s, m_syspath);
     auto *job = action.execute();
 
     connect(job, &KAuth::ExecuteJob::result, this, [this, job, willAnimate] {
@@ -271,9 +291,23 @@ void BacklightBrightness::setBrightness(int newBrightness, bool allowAnimations)
     job->start();
 }
 
+std::optional<QByteArray> BacklightBrightness::edidData() const
+{
+    for (const QString &subPath : {u"/device/edid"_s, u"/edid"_s}) {
+        QFile edidFile(m_syspath + subPath);
+        if (edidFile.open(QIODevice::ReadOnly)) {
+            QByteArray data = edidFile.readAll();
+            if (!data.isEmpty()) {
+                return data;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 bool BacklightBrightness::isInternal() const
 {
-    return true;
+    return !edidData().has_value();
 }
 
 #include "moc_backlightbrightness.cpp"

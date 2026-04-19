@@ -51,4 +51,5 @@ private:
     QList<QPair<QString /*device path*/, int /*max brightness*/>> m_devices;
 
     QVariantAnimation m_anim;
+    QString m_animSyspath;
 };

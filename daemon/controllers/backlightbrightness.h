@@ -32,7 +32,7 @@ public:
     QList<DisplayBrightness *> displays() const override;
 
 private:
-    std::unique_ptr<BacklightBrightness> m_display;
+    std::vector<std::unique_ptr<BacklightBrightness>> m_displays;
 };
 
 class BacklightBrightness : public DisplayBrightness
@@ -46,6 +46,7 @@ public:
     int maxBrightness() const override;
     int brightness() const override;
     void setBrightness(int brightness, bool allowAnimations) override;
+    std::optional<QByteArray> edidData() const override;
     bool isInternal() const override;
 
 private Q_SLOTS:

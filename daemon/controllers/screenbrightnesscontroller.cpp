@@ -140,7 +140,7 @@ void ScreenBrightnessController::onDetectorDisplaysChanged()
 
     // add new displays
     for (const DetectorInfo &detectorInfo : m_detectors) {
-        const bool shouldUseExternalControl = m_externalBrightnessController->isActive() && !dynamic_cast<KWinDisplayDetector *>(detectorInfo.detector);
+        const bool shouldUseExternalControl = m_externalBrightnessController->isActive() && !dynamic_cast<KWinDisplayDetector *>(detectorInfo.detector) && !dynamic_cast<BacklightDetector *>(detectorInfo.detector);
         QList<DisplayBrightness *> detectorDisplays = detectorInfo.detector->displays();
 
         if (!detectorDisplays.isEmpty() && !shouldUseExternalControl) {
@@ -154,6 +154,27 @@ void ScreenBrightnessController::onDetectorDisplaysChanged()
             if (shouldUseExternalControl) {
                 newForExternalControl.push_back(display);
             } else {
+                bool replaceLegacy = false;
+                std::optional<QByteArray> currentEdid = display->edidData();
+                bool isHardwareDetector = !dynamic_cast<KWinDisplayDetector *>(detectorInfo.detector);
+
+                if (isHardwareDetector && !display->isInternal() && currentEdid.has_value() && !currentEdid->isEmpty()) {
+                    auto it = std::ranges::find_if(newDisplayById, [&](const auto &pair) {
+                        return dynamic_cast<KWinDisplayDetector *>(pair.second.detector) &&
+                               pair.second.match.edidData == currentEdid;
+                    });
+                    if (it != newDisplayById.end()) {
+                        const QString &obsoleteId = it->first;
+                        qCDebug(POWERDEVIL) << "Evicting KWin software display" << obsoleteId 
+                                            << "in favor of hardware display" << displayId;
+                        m_sortedDisplayIds.removeAll(obsoleteId);
+                        if (legacyDisplayIds.removeAll(obsoleteId) > 0) {
+                            replaceLegacy = true; 
+                        }
+                        newDisplayById.erase(it);
+                    }
+                }
+
                 auto &info = newDisplayById[displayId];
                 info = DisplayInfo{
                     .display = display,
@@ -168,7 +189,7 @@ void ScreenBrightnessController::onDetectorDisplaysChanged()
                 info.brightnessLogic.setValueRange(display->knownSafeMinBrightness(), display->maxBrightness());
                 info.brightnessLogic.setValue(display->brightness());
                 m_sortedDisplayIds.push_back(displayId);
-                if (detectorInfo.detector == firstSupportedDetector) {
+                if (detectorInfo.detector == firstSupportedDetector || replaceLegacy) {
                     legacyDisplayIds.append(displayId);
                 }
             }

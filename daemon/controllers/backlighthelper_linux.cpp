@@ -42,7 +42,11 @@ void BacklightHelper::init()
     connect(&m_anim, &QVariantAnimation::valueChanged, this, [this](const QVariant &value) {
         // When animating to zero, it emits a value change to 0 before starting the animation...
         if (m_anim.state() == QAbstractAnimation::Running) {
-            writeBrightness(value.toInt());
+            if (!m_animSyspath.isEmpty()) {
+                writeToDevice(m_animSyspath, value.toInt());
+            } else {
+                writeBrightness(value.toInt());
+            }
         }
     });
 
@@ -194,16 +198,21 @@ ActionReply BacklightHelper::setbrightness(const QVariantMap &args)
 
     const int brightness = args.value(QStringLiteral("brightness")).toInt();
     const int animationDuration = args.value(QStringLiteral("animationDuration")).toInt();
+    m_animSyspath = args.value(QStringLiteral("syspath")).toString();
 
     m_anim.stop();
 
     if (animationDuration <= 0) {
-        writeBrightness(brightness);
+        if (!m_animSyspath.isEmpty()) {
+            writeToDevice(m_animSyspath, brightness);
+        } else {
+            writeBrightness(brightness);
+        }
         return ActionReply::SuccessReply();
     }
 
     m_anim.setDuration(animationDuration);
-    m_anim.setStartValue(readBrightness());
+    m_anim.setStartValue(m_animSyspath.isEmpty() ? readBrightness() : readFromDevice(m_animSyspath, QStringLiteral("brightness")));
     m_anim.setEndValue(brightness);
     m_anim.start();
 
@@ -238,6 +247,17 @@ ActionReply BacklightHelper::syspath(const QVariantMap &args)
     }
 
     reply.addData(QStringLiteral("syspath"), m_devices.constFirst().first);
+
+    QStringList syspaths;
+    QVariantList maxes, brightnesses;
+    for (const auto &device : std::as_const(m_devices)) {
+        syspaths.append(device.first);
+        maxes.append(device.second);
+        brightnesses.append(readFromDevice(device.first, QStringLiteral("brightness")));
+    }
+    reply.addData(QStringLiteral("syspaths"), syspaths);
+    reply.addData(QStringLiteral("brightnesses"), brightnesses);
+    reply.addData(QStringLiteral("brightnessmaxes"), maxes);
 
     return reply;
 }
