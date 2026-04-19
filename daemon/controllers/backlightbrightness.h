@@ -32,7 +32,15 @@ public:
     QList<DisplayBrightness *> displays() const override;
 
 private:
+    // Reset m_isDetecting, re-queue detect() if a udev add/remove
+    // arrived during the in-flight KAuth chain, and emit the
+    // end-of-cycle signals. Called from every terminal branch of
+    // detect() (both KAuth error paths and the success paths).
+    void finishDetectionCycle(bool success);
+
     std::vector<std::unique_ptr<BacklightBrightness>> m_displays;
+    bool m_isDetecting = false;
+    bool m_needsRedetect = false;
 };
 
 class BacklightBrightness : public DisplayBrightness

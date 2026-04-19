@@ -35,10 +35,41 @@ inline constexpr QLatin1StringView HELPER_ID("org.kde.powerdevil.backlighthelper
 BacklightDetector::BacklightDetector(QObject *parent)
     : DisplayBrightnessDetector(parent)
 {
+#ifndef Q_OS_FREEBSD
+    // Watch the backlight subsystem so detect() re-runs when kernel
+    // modules load/unload after daemon startup. Without this, backlight
+    // devices that appear after powerdevil starts (late modprobe, USB-C
+    // display docks, virtual backlight drivers) stay invisible until
+    // the daemon is manually restarted.
+    UdevQt::Client *client = new UdevQt::Client(QStringList{u"backlight"_s}, this);
+    connect(client, &UdevQt::Client::deviceAdded, this, [this](const UdevQt::Device &) { detect(); });
+    connect(client, &UdevQt::Client::deviceRemoved, this, [this](const UdevQt::Device &) { detect(); });
+#endif
+}
+
+void BacklightDetector::finishDetectionCycle(bool success)
+{
+    // Reset the in-flight flag first so a queued detect() can actually
+    // proceed when it runs — if we left m_isDetecting == true the
+    // re-dispatched call would hit the entry guard, flip m_needsRedetect
+    // back on, and the detector would never redetect again.
+    m_isDetecting = false;
+    if (m_needsRedetect) {
+        m_needsRedetect = false;
+        QMetaObject::invokeMethod(this, &BacklightDetector::detect, Qt::QueuedConnection);
+    }
+    Q_EMIT detectionFinished(success);
+    Q_EMIT displaysChanged();
 }
 
 void BacklightDetector::detect()
 {
+    if (m_isDetecting) {
+        m_needsRedetect = true;
+        return;
+    }
+    m_isDetecting = true;
+
     for (auto &display : m_displays) {
         if (display) {
             disconnect(display.get(), nullptr, nullptr, nullptr);
@@ -57,7 +88,7 @@ void BacklightDetector::detect()
         if (brightnessJob->error()) {
             qCWarning(POWERDEVIL) << "org.kde.powerdevil.backlighthelper.brightness failed";
             qCDebug(POWERDEVIL) << brightnessJob->errorText();
-            Q_EMIT detectionFinished(false);
+            finishDetectionCycle(false);
             return;
         }
         int cachedBrightness = brightnessJob->data()[u"brightness"_s].toInt();
@@ -69,7 +100,7 @@ void BacklightDetector::detect()
             if (brightnessMaxJob->error()) {
                 qCWarning(POWERDEVIL) << "org.kde.powerdevil.backlighthelper.brightnessmax failed";
                 qCDebug(POWERDEVIL) << brightnessMaxJob->errorText();
-                Q_EMIT detectionFinished(false);
+                finishDetectionCycle(false);
                 return;
             }
             int maxBrightness = brightnessMaxJob->data()[u"brightnessmax"_s].toInt();
@@ -81,7 +112,7 @@ void BacklightDetector::detect()
             if (maxBrightness > 0) {
                 m_displays.push_back(std::unique_ptr<BacklightBrightness>(new BacklightBrightness(cachedBrightness, maxBrightness, QString())));
             }
-            Q_EMIT detectionFinished(!m_displays.empty());
+            finishDetectionCycle(!m_displays.empty());
 #else
             KAuth::Action syspathAction(u"org.kde.powerdevil.backlighthelper.syspath"_s);
             syspathAction.setHelperId(HELPER_ID);
@@ -90,7 +121,7 @@ void BacklightDetector::detect()
                 if (syspathJob->error()) {
                     qCWarning(POWERDEVIL) << "org.kde.powerdevil.backlighthelper.syspath failed";
                     qCDebug(POWERDEVIL) << syspathJob->errorText();
-                    Q_EMIT detectionFinished(false);
+                    finishDetectionCycle(false);
                     return;
                 }
                 const QStringList syspaths = syspathJob->data()[u"syspaths"_s].toStringList();
@@ -106,7 +137,7 @@ void BacklightDetector::detect()
                         m_displays.push_back(std::unique_ptr<BacklightBrightness>(new BacklightBrightness(cachedB, maxB, syspath)));
                     }
                 }
-                Q_EMIT detectionFinished(!m_displays.empty());
+                finishDetectionCycle(!m_displays.empty());
             });
             syspathJob->start();
 #endif
